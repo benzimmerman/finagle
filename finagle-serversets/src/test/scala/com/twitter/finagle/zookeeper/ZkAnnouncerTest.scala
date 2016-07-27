@@ -1,16 +1,25 @@
 package com.twitter.finagle.zookeeper
 
 import com.twitter.conversions.time._
-import com.twitter.finagle.{Announcer, Addr, Address}
+import com.twitter.finagle.{Addr, Address, Announcer}
 import com.twitter.util.{Await, Duration, RandomSocket, Var}
-import java.io.{InputStreamReader, BufferedReader}
-import java.net.{InetSocketAddress, URL}
+import java.io.{BufferedReader, InputStreamReader}
+import java.net.{InetAddress, InetSocketAddress, URL}
+import java.util
+
+import com.twitter.common.zookeeper.Group.JoinException
+import com.twitter.common.zookeeper.{ZooKeeperClient, ZooKeeperUtils}
+import org.apache.zookeeper.{ZKUtil, ZooDefs}
+import org.apache.zookeeper.ZooDefs.Perms
+import org.apache.zookeeper.data.{ACL, Id}
 import org.junit.runner.RunWith
 import org.scalatest.concurrent.Eventually._
 import org.scalatest.exceptions.TestFailedDueToTimeoutException
 import org.scalatest.junit.JUnitRunner
 import org.scalatest.time._
 import org.scalatest.{BeforeAndAfter, FunSuite, Tag}
+
+import scala.collection.immutable.Iterable
 
 @RunWith(classOf[JUnitRunner])
 class ZkAnnouncerTest extends FunSuite with BeforeAndAfter {
@@ -34,7 +43,7 @@ class ZkAnnouncerTest extends FunSuite with BeforeAndAfter {
   }
 
   def toSpan(d: Duration): Span = Span(d.inNanoseconds, Nanoseconds)
-  def hostPath = "localhost:%d!/foo/bar/baz".format(inst.zookeeperAddress.getPort)
+  def  hostPath = "localhost:%d!/foo/bar/baz".format(inst.zookeeperAddress.getPort)
 
   // TODO: remove when no longer flaky.
   override def test(testName: String, testTags: Tag*)(f: => Unit) {
@@ -152,4 +161,40 @@ class ZkAnnouncerTest extends FunSuite with BeforeAndAfter {
     Await.result(Announcer.announce(addr.addr, "zk!%s!0".format(hostPath)))
   }
 
+
+  test("announce a primary endpoint with acls") {
+    val acls = scala.collection.immutable.Iterable[ACL](
+      new ACL(Perms.READ, new Id("world", "anyone")),
+      new ACL(Perms.ALL, new Id("ip", "127.255.255.0")) // reserved IP
+    )
+
+    // everyone can read
+    val path = "/foo/bar/baz"
+    ZooKeeperUtils.ensurePath(inst.zookeeperClient, ZooDefs.Ids.OPEN_ACL_UNSAFE, path)
+
+    // only 127.255.255.0 can create children below /foo/bar/baz
+    val ann = new ZkAnnouncer(factory, Option(acls))
+    val res = new ZkResolver(factory)
+    val addr = Address.Inet(new InetSocketAddress(port1), Addr.Metadata.empty)
+    Await.result(ann.announce(addr.addr, "%s!0".format(hostPath)))
+
+    val va = res.bind(hostPath)
+    eventually {
+      Var.sample(va) match {
+        case Addr.Bound(sockaddrs, attrs) if attrs.isEmpty =>
+          assert(sockaddrs == Set(addr))
+        case _ => fail()
+      }
+    }
+
+    // no one else can create children
+    val rogue = new ZkAnnouncer(factory, Option(acls))
+    try {
+      Await.result(rogue.announce(addr.addr,  "%s/quux!0".format(hostPath)))
+    } catch {
+        case e: JoinException  =>
+          assert(e.getMessage.equals("Problem joining partition group at path: /foo/bar/baz/quux"))
+        case e: Throwable => fail()
+    }
+  }
 }

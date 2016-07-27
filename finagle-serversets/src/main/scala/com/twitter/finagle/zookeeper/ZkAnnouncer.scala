@@ -2,10 +2,13 @@ package com.twitter.finagle.zookeeper
 
 import com.twitter.common.zookeeper.ServerSet.EndpointStatus
 import com.twitter.common.zookeeper.{ServerSet, ServerSetImpl, ZooKeeperClient}
-import com.twitter.finagle.{Announcer, Announcement}
+import com.twitter.finagle.{Announcement, Announcer}
 import com.twitter.util.{Future, NonFatal, Promise}
 import java.net.InetSocketAddress
 import java.util.concurrent.LinkedBlockingQueue
+
+import org.apache.zookeeper.data.ACL
+
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 
@@ -26,9 +29,11 @@ class ZkAnnouncerException(msg: String) extends Exception(msg)
  * process is similar: leave the path, then remove either the additional endpoint
  * or the main endpoint, re-join only if the main endpoint exists.
  */
-class ZkAnnouncer(factory: ZkClientFactory) extends Announcer { self =>
+class ZkAnnouncer(factory: ZkClientFactory, acl: Option[scala.collection.immutable.Iterable[ACL]]) extends Announcer { self =>
   val scheme = "zk"
 
+  def this(acl: scala.collection.immutable.Iterable[ACL]) = this(DefaultZkClientFactory, Option(acl))
+  def this(factory: ZkClientFactory) = this(factory, None)
   def this() = this(DefaultZkClientFactory)
 
   private[this] case class ServerSetConf(
@@ -103,7 +108,13 @@ class ZkAnnouncer(factory: ZkClientFactory) extends Announcer { self =>
     endpoint: Option[String]
   ): Future[Announcement] = {
     val conf = serverSets find { s => s.client == client && s.path == path && s.shardId == shardId } getOrElse {
-      val serverSetConf = ServerSetConf(client, path, shardId, new ServerSetImpl(client, path))
+
+      val serverSet = if (acl.isEmpty) {
+        new ServerSetImpl(client, path)
+      } else {
+        new ServerSetImpl(client, acl.get.asJava, path)
+      }
+      val serverSetConf = ServerSetConf(client, path, shardId, serverSet)
       synchronized { serverSets += serverSetConf }
       serverSetConf
     }
